@@ -1,0 +1,13 @@
+!Debug/
+Debug/*
+!Debug/makefile
+!Debug/objects.mk
+!Debug/sources.mk
+
+!Debug/src/
+Debug/src/*
+!Debug/src/subdir.mk
+
+.project
+.cproject
+.settings/
