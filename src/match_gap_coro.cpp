@@ -16,7 +16,7 @@
 #define STATE_M 0
 #define STATE_I 1
 #define STATE_D 2
-#define NR_COROS 3
+#define NR_COROS 2
 
 std::vector<cppcoro::generator<bool>>
     coro_generators;
@@ -95,7 +95,7 @@ static inline int int_log2(uint32_t v)
 }
 
 
-cppcoro::generator<bwt_aln1_t *> match_gap(bwt_t *const bwt, int len, const ubyte_t *seq, bwt_width_t *width,
+cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len, const ubyte_t *seq, bwt_width_t *width,
                           bwt_width_t *seed_width, const gap_opt_t *opt, int *_n_aln, gap_stack_t *stack)
 { // $seq is the reverse complement of the input read
     int best_score = aln_score(opt->max_diff+1, opt->max_gapo+1, opt->max_gape+1, opt);
@@ -187,10 +187,22 @@ cppcoro::generator<bwt_aln1_t *> match_gap(bwt_t *const bwt, int len, const ubyt
         }
 
         --i;
+        bwtint_t
+            temp_k = k - 1,
+            temp_l = l - 1;
+        temp_k -= (temp_k >= bwt->primary);
+        temp_l -= (temp_l >= bwt->primary);
+
         uint32_t
-            *p = bwt_occ_intv(bwt, k);
-        __builtin_prefetch(p);
+            *pre_p = bwt_occ_intv(bwt, temp_k),
+            *pre_l = bwt_occ_intv(bwt, temp_l);
+        __builtin_prefetch(pre_p);
+        __builtin_prefetch(pre_l);
+
+//        printf("Pre p: %p %p %lu\n", pre_p, bwt, temp_k);
+//        printf("%i\n", job_nr);
         co_yield nullptr;
+//        printf("%i\n", job_nr);
 
         bwt_2occ4(bwt, k - 1, l, cnt_k, cnt_l); // retrieve Occ values
         occ = l - k + 1;
@@ -304,7 +316,7 @@ cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n
             p->seq[j] = p->seq[j] > 3? 4 : 3 - p->seq[j];
 
         cppcoro::generator<bwt_aln1_t *>
-            m_gap = match_gap(bwt, p->len, p->seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack);
+            m_gap = match_gap(*next_job - 1,bwt, p->len, p->seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack);
         cppcoro::generator<bwt_aln1_t *>::iterator
             m_gap_it = m_gap.begin();
 
@@ -352,7 +364,7 @@ bool coro_incr(int coro_idx)
 void coro_destroy()
 {
     coro_generators.clear();
-    coro_iterators.pop_back();
+    coro_iterators.clear();
 }
 
 void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
@@ -372,6 +384,7 @@ void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *s
             done &= coro_incr(i);
 
     }
+    std::cout << coro_generators.size() << " " << coro_iterators.size();
 //    puts("done");
     coro_destroy();
 }
