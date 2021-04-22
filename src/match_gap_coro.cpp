@@ -16,7 +16,7 @@
 #define STATE_M 0
 #define STATE_I 1
 #define STATE_D 2
-#define NR_COROS 2
+#define NR_COROS 4
 
 struct g_push_param
 {
@@ -67,11 +67,11 @@ struct g_push_param
 //std::vector<cppcoro::generator<bwt_aln1_t *>::iterator>
 //    its_match_gap;
 
-std::vector<cppcoro::generator<bool>>
-    coros_reg_gap;
-
-std::vector<cppcoro::generator<bool>::iterator>
-    its_reg_gap;
+//std::vector<cppcoro::generator<bool>>
+//    coros_reg_gap;
+//
+//std::vector<cppcoro::generator<bool>::iterator>
+//    its_reg_gap;
 
 static void gap_reset_stack(gap_stack_t *stack)
 {
@@ -510,12 +510,11 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
 
     *_n_aln = n_aln;
     //fprintf(stderr, "max_entries = %d\n", max_entries);
-//    for(;;)
-//    printf("%i\n", aln);
+
     co_yield aln;
 }
 
-cppcoro::generator<bool> reg_gap(int job_id, int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
+cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
 
     int i, j, max_l = 0, max_len;
@@ -609,33 +608,33 @@ cppcoro::generator<bool> reg_gap(int job_id, int *next_job, int tid, bwt_t *cons
     }
 }
 
-void coro_init(int nr_coros, int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
-{
-    for(int i = 0; i < nr_coros; ++i)
-    {
-//        coros_match_gap.push_back(match_gap(i));
-//        its_match_gap.push_back(coros_match_gap[i].begin());
-    }
-    for(int i = 0; i < nr_coros; ++i)
-    {
-        coros_reg_gap.push_back(reg_gap(i, next_job, tid, bwt, n_seqs, seqs, opt));
-        its_reg_gap.push_back(coros_reg_gap[i].begin());
-    }
-}
-
-bool coro_incr(int job_id)
-{
-    ++its_reg_gap[job_id];
-    return *(its_reg_gap[job_id]);
-}
-
-void coro_destroy()
-{
-    coros_reg_gap.clear();
-    its_reg_gap.clear();
-//    coros_match_gap.clear();
-//    its_match_gap.clear();
-}
+//void coro_init(int nr_coros, int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
+//{
+//    for(int i = 0; i < nr_coros; ++i)
+//    {
+////        coros_match_gap.push_back(match_gap(i));
+////        its_match_gap.push_back(coros_match_gap[i].begin());
+//    }
+//    for(int i = 0; i < nr_coros; ++i)
+//    {
+//        coros_reg_gap.push_back(reg_gap(i, next_job, tid, bwt, n_seqs, seqs, opt));
+//        its_reg_gap.push_back(coros_reg_gap[i].begin());
+//    }
+//}
+//
+//bool coro_incr(int job_id)
+//{
+//    ++its_reg_gap[job_id];
+//    return *(its_reg_gap[job_id]);
+//}
+//
+//void coro_destroy()
+//{
+//    coros_reg_gap.clear();
+//    its_reg_gap.clear();
+////    coros_match_gap.clear();
+////    its_match_gap.clear();
+//}
 
 void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
@@ -645,17 +644,53 @@ void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *s
     int
         next_job = 0;
 
-    coro_init(NR_COROS, &next_job, tid, bwt, n_seqs, seqs, opt);
+//    coro_init(NR_COROS, &next_job, tid, bwt, n_seqs, seqs, opt);
+
+    cppcoro::generator<bool>
+        reg_gap1 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+        reg_gap2 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
+//    cppcoro::generator<bool>
+//        reg_gap3 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+//        reg_gap4 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
+//    cppcoro::generator<bool>
+//        reg_gap5 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+//        reg_gap6 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
+//    cppcoro::generator<bool>
+//        reg_gap7 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+//        reg_gap8 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
+
+    cppcoro::generator<bool>::iterator
+        it1 = reg_gap1.begin(),
+        it2 = reg_gap2.begin();
+//    cppcoro::generator<bool>::iterator
+//        it3 = reg_gap3.begin(),
+//        it4 = reg_gap4.begin();
+//    cppcoro::generator<bool>::iterator
+//        it5 = reg_gap5.begin(),
+//        it6 = reg_gap6.begin();
+//    cppcoro::generator<bool>::iterator
+//        it7 = reg_gap7.begin(),
+//        it8 = reg_gap8.begin();
 
     while(!done)
     {
         done = true;
-        for(int i = 0; i < NR_COROS; ++i)
-            done &= coro_incr(i);
+//        for(int i = 0; i < NR_COROS; ++i)
+//        {
+            ++it1, ++it2;
+            done &= *it1, done &= *it2;
+//            ++it3, ++it4;
+//            done &= *it3, done &= *it4;
+//            ++it5, ++it6;
+//            done &= *it5, done &= *it6;
+//            ++it7, ++it8;
+//            done &= *it7, done &= *it8;
+//        }
+//            done &= coro_incr(i);
 
     }
 //    std::cout << coro_generators.size() << " " << coro_iterators.size();
 //    puts("done");
 
-    coro_destroy();
+//    coro_destroy();
 }
