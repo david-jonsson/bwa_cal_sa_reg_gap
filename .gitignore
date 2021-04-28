@@ -11,3 +11,4 @@ Debug/src/*
 .project
 .cproject
 .settings/
+/Debug/
