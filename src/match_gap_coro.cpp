@@ -28,6 +28,153 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
                           bwt_width_t *seed_width, const gap_opt_t *opt, int *_n_aln, gap_stack_t *stack);
 cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt);
 
+static inline int __occ_aux(uint64_t y, int c)
+{
+    // reduce nucleotide counting to bits counting
+    y = ((c&2)? y : ~y) >> 1 & ((c&1)? y : ~y) & 0x5555555555555555ull;
+    // count the number of 1s in y
+    y = (y & 0x3333333333333333ull) + (y >> 2 & 0x3333333333333333ull);
+    return ((y + (y >> 4)) & 0xf0f0f0f0f0f0f0full) * 0x101010101010101ull >> 56;
+}
+
+inline bwtint_t bwt_occ(const bwt_t *bwt, bwtint_t k, ubyte_t c)
+{
+    bwtint_t n;
+    uint32_t *p, *end;
+
+    if (k == bwt->seq_len) return bwt->L2[c+1] - bwt->L2[c];
+    if (k == (bwtint_t)(-1)) return 0;
+    k -= (k >= bwt->primary); // because $ is not in bwt
+
+    // retrieve Occ at k/OCC_INTERVAL
+    n = ((bwtint_t*)(p = bwt_occ_intv(bwt, k)))[c];
+    p += sizeof(bwtint_t); // jump to the start of the first BWT cell
+
+    // calculate Occ up to the last k/32
+    end = p + (((k>>5) - ((k&~OCC_INTV_MASK)>>5))<<1);
+    for (; p < end; p += 2) n += __occ_aux((uint64_t)p[0]<<32 | p[1], c);
+
+    // calculate Occ
+    n += __occ_aux(((uint64_t)p[0]<<32 | p[1]) & ~((1ull<<((~k&31)<<1)) - 1), c);
+    if (c == 0) n -= ~k&31; // corrected for the masked bits
+
+    return n;
+}
+
+// an analogy to bwt_occ() but more efficient, requiring k <= l
+inline void bwt_2occ(const bwt_t *bwt, bwtint_t k, bwtint_t l, ubyte_t c, bwtint_t *ok, bwtint_t *ol)
+{
+    bwtint_t _k, _l;
+    _k = (k >= bwt->primary)? k-1 : k;
+    _l = (l >= bwt->primary)? l-1 : l;
+    if (_l/OCC_INTERVAL != _k/OCC_INTERVAL || k == (bwtint_t)(-1) || l == (bwtint_t)(-1)) {
+        *ok = bwt_occ(bwt, k, c);
+        *ol = bwt_occ(bwt, l, c);
+    } else {
+        bwtint_t m, n, i, j;
+        uint32_t *p;
+        if (k >= bwt->primary) --k;
+        if (l >= bwt->primary) --l;
+        n = ((bwtint_t*)(p = bwt_occ_intv(bwt, k)))[c];
+        p += sizeof(bwtint_t);
+        // calculate *ok
+        j = k >> 5 << 5;
+        for (i = k/OCC_INTERVAL*OCC_INTERVAL; i < j; i += 32, p += 2)
+            n += __occ_aux((uint64_t)p[0]<<32 | p[1], c);
+        m = n;
+        n += __occ_aux(((uint64_t)p[0]<<32 | p[1]) & ~((1ull<<((~k&31)<<1)) - 1), c);
+        if (c == 0) n -= ~k&31; // corrected for the masked bits
+        *ok = n;
+        // calculate *ol
+        j = l >> 5 << 5;
+        for (; i < j; i += 32, p += 2)
+            m += __occ_aux((uint64_t)p[0]<<32 | p[1], c);
+        m += __occ_aux(((uint64_t)p[0]<<32 | p[1]) & ~((1ull<<((~l&31)<<1)) - 1), c);
+        if (c == 0) m -= ~l&31; // corrected for the masked bits
+        *ol = m;
+    }
+}
+
+#define __occ_aux4(bwt, b)                                          \
+    ((bwt)->cnt_table[(b)&0xff] + (bwt)->cnt_table[(b)>>8&0xff]     \
+     + (bwt)->cnt_table[(b)>>16&0xff] + (bwt)->cnt_table[(b)>>24])
+
+inline void bwt_occ4(const bwt_t *bwt, bwtint_t k, bwtint_t cnt[4])
+{
+    bwtint_t x;
+    uint32_t *p, tmp, *end;
+    if (k == (bwtint_t)(-1)) {
+        memset(cnt, 0, 4 * sizeof(bwtint_t));
+        return;
+    }
+    k -= (k >= bwt->primary); // because $ is not in bwt
+    p = bwt_occ_intv(bwt, k);
+    // printf("occ_0: %p %p %lu\n", p, bwt, k);
+
+    memcpy(cnt, p, 4 * sizeof(bwtint_t));
+    p += sizeof(bwtint_t); // sizeof(bwtint_t) = 4*(sizeof(bwtint_t)/sizeof(uint32_t))
+    end = p + ((k>>4) - ((k&~OCC_INTV_MASK)>>4)); // this is the end point of the following loop
+    for (x = 0; p < end; ++p) x += __occ_aux4(bwt, *p);
+    tmp = *p & ~((1U<<((~k&15)<<1)) - 1);
+    x += __occ_aux4(bwt, tmp) - (~k&15);
+    cnt[0] += x&0xff; cnt[1] += x>>8&0xff; cnt[2] += x>>16&0xff; cnt[3] += x>>24;
+}
+
+// an analogy to bwt_occ4() but more efficient, requiring k <= l
+inline void bwt_2occ4(const bwt_t *bwt, bwtint_t k, bwtint_t l, bwtint_t cntk[4], bwtint_t cntl[4])
+{
+    bwtint_t _k, _l;
+    _k = k - (k >= bwt->primary);
+    _l = l - (l >= bwt->primary);
+    if (_l>>OCC_INTV_SHIFT != _k>>OCC_INTV_SHIFT || k == (bwtint_t)(-1) || l == (bwtint_t)(-1)) {
+        bwt_occ4(bwt, k, cntk);
+        bwt_occ4(bwt, l, cntl);
+    } else {
+        bwtint_t x, y;
+        uint32_t *p, tmp, *endk, *endl;
+        k -= (k >= bwt->primary); // because $ is not in bwt
+        l -= (l >= bwt->primary);
+        p = bwt_occ_intv(bwt, k);
+        // printf("occ_4: %p %p %lu\n", p, bwt, k);
+
+        memcpy(cntk, p, 4 * sizeof(bwtint_t));
+        p += sizeof(bwtint_t); // sizeof(bwtint_t) = 4*(sizeof(bwtint_t)/sizeof(uint32_t))
+        // prepare cntk[]
+        endk = p + ((k>>4) - ((k&~OCC_INTV_MASK)>>4));
+        endl = p + ((l>>4) - ((l&~OCC_INTV_MASK)>>4));
+        for (x = 0; p < endk; ++p) x += __occ_aux4(bwt, *p);
+        y = x;
+        tmp = *p & ~((1U<<((~k&15)<<1)) - 1);
+        x += __occ_aux4(bwt, tmp) - (~k&15);
+        // calculate cntl[] and finalize cntk[]
+        for (; p < endl; ++p) y += __occ_aux4(bwt, *p);
+        tmp = *p & ~((1U<<((~l&15)<<1)) - 1);
+        y += __occ_aux4(bwt, tmp) - (~l&15);
+        memcpy(cntl, cntk, 4 * sizeof(bwtint_t));
+        cntk[0] += x&0xff; cntk[1] += x>>8&0xff; cntk[2] += x>>16&0xff; cntk[3] += x>>24;
+        cntl[0] += y&0xff; cntl[1] += y>>8&0xff; cntl[2] += y>>16&0xff; cntl[3] += y>>24;
+    }
+}
+
+int bwt_match_exact(const bwt_t *bwt, int len, const ubyte_t *str, bwtint_t *sa_begin, bwtint_t *sa_end)
+{
+    bwtint_t k, l, ok, ol;
+    int i;
+    k = 0; l = bwt->seq_len;
+    for (i = len - 1; i >= 0; --i) {
+        ubyte_t c = str[i];
+        if (c > 3) return 0; // no match
+        bwt_2occ(bwt, k - 1, l, c, &ok, &ol);
+        k = bwt->L2[c] + ok + 1;
+        l = bwt->L2[c] + ol;
+        if (k > l) break; // no match
+    }
+    if (k > l) return 0; // no match
+    if (sa_begin) *sa_begin = k;
+    if (sa_end)   *sa_end = l;
+    return l - k + 1;
+}
+
 static void gap_reset_stack(gap_stack_t *stack)
 {
     int i;
@@ -120,6 +267,7 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
 //    else
     if (_j <= max_diff)
     {
+
         //for (j = 0; j != len; ++j) printf("#0 %d: [%d,%u]\t[%d,%u]\n", j, w[0][j].bid, w[0][j].w, w[1][j].bid, w[1][j].w);
         gap_reset_stack(stack); // reset stack
         gap_push(stack, len, 0, bwt->seq_len, 0, 0, 0, 0, 0, 0, 0, opt);
@@ -211,7 +359,7 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
             __builtin_prefetch(pre_p + 16);
             __builtin_prefetch(pre_l);
 
-            co_yield nullptr;
+            co_yield 0;
 
             bwt_2occ4(bwt, k - 1, l, cnt_k, cnt_l); // retrieve Occ values
             occ = l - k + 1;
@@ -323,7 +471,7 @@ cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n
         // core function
         for (j = 0; j < p->len; ++j) // we need to complement
             p->seq[j] = p->seq[j] > 3? 4 : 3 - p->seq[j];
-
+        {
         cppcoro::generator<bwt_aln1_t *>
             m_gap = match_gap(*next_job - 1,bwt, p->len, p->seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack);
         cppcoro::generator<bwt_aln1_t *>::iterator
@@ -331,12 +479,15 @@ cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n
 
         while(m_gap_it != m_gap.end())
         {
+//            __builtin_prefetch(&(*m_gap_it));
             ++m_gap_it;
+
             co_yield 0;
 //            puts("not done");
         }
 
         p->aln = *m_gap_it;
+        }
 
         //fprintf(stderr, "mm=%lld,ins=%lld,del=%lld,gapo=%lld\n", p->aln->n_mm, p->aln->n_ins, p->aln->n_del, p->aln->n_gapo);
         // clean up the unused data in the record
