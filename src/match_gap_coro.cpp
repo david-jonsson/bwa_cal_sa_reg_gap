@@ -156,24 +156,6 @@ inline void bwt_2occ4(const bwt_t *bwt, bwtint_t k, bwtint_t l, bwtint_t cntk[4]
     }
 }
 
-int bwt_match_exact(const bwt_t *bwt, int len, const ubyte_t *str, bwtint_t *sa_begin, bwtint_t *sa_end)
-{
-    bwtint_t k, l, ok, ol;
-    int i;
-    k = 0; l = bwt->seq_len;
-    for (i = len - 1; i >= 0; --i) {
-        ubyte_t c = str[i];
-        if (c > 3) return 0; // no match
-        bwt_2occ(bwt, k - 1, l, c, &ok, &ol);
-        k = bwt->L2[c] + ok + 1;
-        l = bwt->L2[c] + ol;
-        if (k > l) break; // no match
-    }
-    if (k > l) return 0; // no match
-    if (sa_begin) *sa_begin = k;
-    if (sa_end)   *sa_end = l;
-    return l - k + 1;
-}
 
 static void gap_reset_stack(gap_stack_t *stack)
 {
@@ -245,7 +227,60 @@ static inline int int_log2(uint32_t v)
     return c;
 }
 
-cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len, const ubyte_t *seq, bwt_width_t *width,
+inline cppcoro::generator<int> match_exact_alt(const bwt_t *bwt, int len, const ubyte_t *str, bwtint_t *k0, bwtint_t *l0)
+{
+    int i;
+    bwtint_t k, l, ok, ol;
+    k = *k0; l = *l0;
+    bool
+        return_zero = false;
+
+    for (i = len - 1; i >= 0; --i) {
+        ubyte_t c = str[i];
+        if (c > 3)
+        {
+            return_zero = true;
+            break;
+        }
+//            return 0; // there is an N here. no match
+        bwtint_t
+            temp_k = k - 1,
+            temp_l = l;
+        temp_k -= (temp_k >= bwt->primary);
+        temp_l -= (temp_l >= bwt->primary);
+        uint32_t
+            *pre_p = bwt_occ_intv(bwt, temp_k),
+            *pre_l = bwt_occ_intv(bwt, temp_l);
+        __builtin_prefetch(pre_p);
+        __builtin_prefetch(pre_p + 16);
+        __builtin_prefetch(pre_l);
+        __builtin_prefetch(pre_l + 16);
+
+        co_yield 0;
+
+        bwt_2occ(bwt, k - 1, l, c, &ok, &ol);
+        k = bwt->L2[c] + ok + 1;
+        l = bwt->L2[c] + ol;
+        if (k > l)
+        {
+            return_zero = true;
+            break;
+        }
+//            return 0; // no match
+    }
+    bwtint_t
+        ret;
+    if(return_zero)
+        ret = 0;
+    else
+    {
+        *k0 = k; *l0 = l;
+        ret = l - k + 1;
+    }
+    co_yield ret;
+}
+
+inline cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len, const ubyte_t *seq, bwt_width_t *width,
                           bwt_width_t *seed_width, const gap_opt_t *opt, int *_n_aln, gap_stack_t *stack)
 { // $seq is the reverse complement of the input read
     int best_score = aln_score(opt->max_diff+1, opt->max_gapo+1, opt->max_gape+1, opt);
@@ -303,8 +338,20 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
             // check whether a hit is found
             hit_found = 0;
             if (i == 0) hit_found = 1;
-            else if (m == 0 && (e.state == STATE_M || (opt->mode&BWA_MODE_GAPE) || e.n_gape == opt->max_gape)) { // no diff allowed
-                if (bwt_match_exact_alt(bwt, i, seq, &k, &l)) hit_found = 1;
+            else if (m == 0 && (e.state == STATE_M || (opt->mode&BWA_MODE_GAPE) || e.n_gape == opt->max_gape))
+            { // no diff allowed
+//                if (bwt_match_exact_alt(bwt, i, seq, &k, &l)) hit_found = 1;
+
+                cppcoro::generator<int>
+                    me_alt = match_exact_alt(bwt, i, seq, &k, &l);
+                cppcoro::generator<int>::iterator
+                    me_alt_it = me_alt.begin();
+                while(me_alt_it != me_alt.end())
+                {
+                    ++me_alt_it;
+                    co_yield 0;
+                }
+                if(*me_alt_it) hit_found = 1;
                 else continue; // no hit, skip
             }
 
@@ -358,6 +405,7 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
             __builtin_prefetch(pre_p);
             __builtin_prefetch(pre_p + 16);
             __builtin_prefetch(pre_l);
+            __builtin_prefetch(pre_l + 16);
 
             co_yield 0;
 
@@ -429,7 +477,46 @@ cppcoro::generator<bwt_aln1_t *> match_gap(int job_nr, bwt_t *const bwt, int len
     co_yield aln;
 }
 
-cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
+inline cppcoro::generator<int> cal_width(const bwt_t *bwt, int len, const ubyte_t *str, bwt_width_t *width)
+{
+    bwtint_t k, l, ok, ol;
+    int i, bid;
+    bid = 0;
+    k = 0; l = bwt->seq_len;
+    for (i = 0; i < len; ++i) {
+        ubyte_t c = str[i];
+        if (c < 4) {
+            bwtint_t
+                temp_k = k - 1,
+                temp_l = l;
+            temp_k -= (temp_k >= bwt->primary);
+            temp_l -= (temp_l >= bwt->primary);
+            uint32_t
+                *pre_p = bwt_occ_intv(bwt, temp_k),
+                *pre_l = bwt_occ_intv(bwt, temp_l);
+            __builtin_prefetch(pre_p);
+            __builtin_prefetch(pre_p + 16);
+            __builtin_prefetch(pre_l);
+            __builtin_prefetch(pre_l + 16);
+            co_yield 0;
+            bwt_2occ(bwt, k - 1, l, c, &ok, &ol);
+            k = bwt->L2[c] + ok + 1;
+            l = bwt->L2[c] + ol;
+        }
+        if (k > l || c > 3) { // then restart
+            k = 0;
+            l = bwt->seq_len;
+            ++bid;
+        }
+        width[i].w = l - k + 1;
+        width[i].bid = bid;
+    }
+    width[len].w = 0;
+    width[len].bid = ++bid;
+    co_yield bid;
+}
+
+inline cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
 
     int i, j, max_l = 0, max_len;
@@ -463,30 +550,49 @@ cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt, int n
             w = (bwt_width_t*)realloc(w, (max_l + 1) * sizeof(bwt_width_t));
             memset(w, 0, (max_l + 1) * sizeof(bwt_width_t));
         }
-        bwt_cal_width(bwt, p->len, p->seq, w);
+        //bwt_cal_width(bwt, p->len, p->seq, w);
+        {
+            cppcoro::generator<int>
+                cal_w = cal_width(bwt, p->len, p->seq, w);
+            cppcoro::generator<int>::iterator
+                cal_w_it = cal_w.begin();
+            while(cal_w_it != cal_w.end())
+            {
+                ++cal_w_it;
+                co_yield 0;
+            }
+        }
         if (opt->fnr > 0.0) local_opt.max_diff = bwa_cal_maxdiff(p->len, BWA_AVG_ERR, opt->fnr);
         local_opt.seed_len = opt->seed_len < p->len? opt->seed_len : 0x7fffffff;
         if (p->len > opt->seed_len)
-            bwt_cal_width(bwt, opt->seed_len, p->seq + (p->len - opt->seed_len), seed_w);
+        {
+            cppcoro::generator<int>
+                cal_w = cal_width(bwt, opt->seed_len, p->seq + (p->len - opt->seed_len), seed_w);
+            cppcoro::generator<int>::iterator
+                cal_w_it = cal_w.begin();
+            while(cal_w_it != cal_w.end())
+            {
+                ++cal_w_it;
+                co_yield 0;
+            }
+        }
+            //bwt_cal_width(bwt, opt->seed_len, p->seq + (p->len - opt->seed_len), seed_w);
         // core function
         for (j = 0; j < p->len; ++j) // we need to complement
             p->seq[j] = p->seq[j] > 3? 4 : 3 - p->seq[j];
         {
-        cppcoro::generator<bwt_aln1_t *>
-            m_gap = match_gap(*next_job - 1,bwt, p->len, p->seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack);
-        cppcoro::generator<bwt_aln1_t *>::iterator
-            m_gap_it = m_gap.begin();
+            cppcoro::generator<bwt_aln1_t *>
+                m_gap = match_gap(*next_job - 1,bwt, p->len, p->seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack);
+            cppcoro::generator<bwt_aln1_t *>::iterator
+                m_gap_it = m_gap.begin();
 
-        while(m_gap_it != m_gap.end())
-        {
-//            __builtin_prefetch(&(*m_gap_it));
-            ++m_gap_it;
+            while(m_gap_it != m_gap.end())
+            {
+                ++m_gap_it;
+                co_yield 0;
+            }
 
-            co_yield 0;
-//            puts("not done");
-        }
-
-        p->aln = *m_gap_it;
+            p->aln = *m_gap_it;
         }
 
         //fprintf(stderr, "mm=%lld,ins=%lld,del=%lld,gapo=%lld\n", p->aln->n_mm, p->aln->n_ins, p->aln->n_del, p->aln->n_gapo);
@@ -548,7 +654,7 @@ void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *s
             ++it2;
             done = 0;
         }
-//
+
 //        if(it3 != reg_gap3.end())
 //        {
 //            ++it3;
