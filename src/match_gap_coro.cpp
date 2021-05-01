@@ -602,9 +602,11 @@ inline cppcoro::generator<bool> reg_gap(int *next_job, int tid, bwt_t *const bwt
     }
     free(seed_w); free(w);
     gap_destroy_stack(stack);
+    co_yield 1;
 }
 
 
+#define NR_COROS 3
 void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
 
@@ -614,78 +616,26 @@ void coro_bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *s
         next_job = 0;
 
     cppcoro::generator<bool>
-        reg_gap1 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
-        reg_gap2 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
+        reg_gaps[NR_COROS] =
+        {
+             reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+             reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+             reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+//             reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
+        };
     cppcoro::generator<bool>::iterator
-        it1 = reg_gap1.begin(),
-        it2 = reg_gap2.begin();
+        its[NR_COROS];
 
-//    cppcoro::generator<bool>
-//        reg_gap3 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
-//        reg_gap4 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
-//    cppcoro::generator<bool>::iterator
-//        it3 = reg_gap1.begin(),
-//        it4 = reg_gap2.begin();
-//
-//    cppcoro::generator<bool>
-//        reg_gap5 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
-//        reg_gap6 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
-//    cppcoro::generator<bool>::iterator
-//        it5 = reg_gap5.begin(),
-//        it6 = reg_gap6.begin();
-//
-//    cppcoro::generator<bool>
-//        reg_gap7 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt),
-//        reg_gap8 = reg_gap(&next_job, tid, bwt, n_seqs, seqs, opt);
-//    cppcoro::generator<bool>::iterator
-//        it7 = reg_gap7.begin(),
-//        it8 = reg_gap8.begin();
+    for(int i = 0; i < NR_COROS; ++i)
+        its[i] = reg_gaps[i].begin();
 
     while(!done)
     {
         done = true;
-        if(it1 != reg_gap1.end())
+        for(int i = 0; i < NR_COROS; ++i)
         {
-            ++it1;
-            done = 0;
+            ++its[i];
+            done &= *its[i];
         }
-        if(it2 != reg_gap2.end())
-        {
-            ++it2;
-            done = 0;
-        }
-
-//        if(it3 != reg_gap3.end())
-//        {
-//            ++it3;
-//            done = 0;
-//        }
-//        if(it4 != reg_gap4.end())
-//        {
-//            ++it4;
-//            done = 0;
-//        }
-
-//        if(it5 != reg_gap5.end())
-//        {
-//            ++it5;
-//            done = 0;
-//        }
-//        if(it6 != reg_gap6.end())
-//        {
-//            ++it6;
-//            done = 0;
-//        }
-
-//        if(it7 != reg_gap7.end())
-//        {
-//            ++it7;
-//            done = 0;
-//        }
-//        if(it8 != reg_gap8.end())
-//        {
-//            ++it8;
-//            done = 0;
-//        }
     }
 }
