@@ -5,4 +5,4 @@
 
 # Requirements
 * Clang10
-* [https://github.com/lewissbaker/cppcoro](cppcoro)
+* [cppcoro](https://github.com/lewissbaker/cppcoro)
